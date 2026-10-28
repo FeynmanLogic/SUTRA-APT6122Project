@@ -1,6 +1,6 @@
 # Sutra: implementation and PACE-ICE execution guide
 
-Updated 24 October 2026. Companion to `PROJECT_DELIVERY_PLAN.md` and `notebooks/Sutra_PACE_ICE_Demo.ipynb`.
+Updated 28 October 2026. Companion to `PROJECT_DELIVERY_PLAN.md` and `notebooks/Sutra_PACE_ICE_Demo.ipynb`. The standalone scheduler is now implemented; section 10 of the delivery plan records its exact API and Jayani/Dhruv follow-up work. Full-service notebook execution remains gated until transport/worker/launcher integration.
 
 ## 1. Use C++ source files, scripts, and a notebook together
 
@@ -38,7 +38,7 @@ First target: **one mock request through the full C++ path**, followed by 100 re
 | 10 | All | Two GPUs, then multiple nodes if required; continuous slot replacement if required by rubric | Separate GPU UUIDs and worker IDs visible; cross-node connectivity proven before performance claims |
 | 11 | Dhruv + all | Benchmark runner, CSV/manifest, plots, scripts and report | Same config/seed/workload across comparisons; warmup omitted; figures regenerate from raw results |
 
-**Aashish's first coding task:** implement a transport-independent scheduler class with `submit`, worker-ready/capacity updates, `nextBatch`/dispatch callback, and `shutdown`. Pass a clock or explicit timestamps into policy helpers so FIFO, priority ties, aging and timer behavior can be tested without flaky sleeps. Share the interface before connecting it to router code. Do not put socket or llama.cpp calls inside queue policy code.
+**Aashish's scheduler component is implemented:** `scheduler/scheduler.hpp/.cpp` provides `submit`, `registerWorker`, `setWorkerReady`, `heartbeat`, `waitForDispatch`/`tryDispatch`, `complete`, completion collection, deadline polling and `shutdown`. Policy tests pass explicit steady-clock timestamps; production blocking paths use condition variables. Next work is teammate integration and Linux/ICE validation, using the API and owner checklists in delivery-plan section 10. Socket and llama.cpp calls stay outside queue policy code.
 
 Suggested file boundaries:
 
@@ -74,7 +74,7 @@ An SSH alternative to OnDemand (outside the notebook): course material uses `sal
 
 ## 5. Execution contract to implement once, then reuse
 
-The following **Sutra commands are proposed interfaces, not implemented commands**. Match target output directories explicitly in CMake so scripts do not guess executable locations.
+The CPU CMake/CTest build now runs scheduler tests, but coordinator/worker/client targets, CUDA backend linkage and `scripts/run_demo.sh` remain proposed. The working scheduler-only executable is `./build-scheduler/sutra_scheduler_demo` after building into `build-scheduler`; it uses synthetic replies. The following full-service workflow is still an implementation target; the first three commands already configure/build/test the scheduler into `build-mock`.
 
 ```bash
 # Mock configure/build/test: first implement this CMake option and these targets.

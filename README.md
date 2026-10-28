@@ -240,4 +240,15 @@ The following setup has been verified on PACE ICE:
 - Qwen2.5 0.5B Instruct using Q4_K_M quantization
 - CPU and GPU llama.cpp microbenchmarks
 
-The Sutra worker, scheduler, router, and end-to-end benchmark runner remain under development.
+The standalone scheduler is implemented and tested locally. It supports bounded admission, FIFO/priority with aging, count/timer batches, round-robin/least-loaded worker selection, capacity accounting, deadlines, heartbeat expiry and shutdown. Router/worker wiring, real inference and end-to-end benchmarking remain pending. Jayani's initial TCP echo router is on `feature/tcp-router` and has not been merged into this branch. See [the scheduler handoff](PROJECT_DELIVERY_PLAN.md#10-scheduler-delivery-and-teammate-handoff--28-october-2026) for the API and owner checklists.
+
+Build and exercise the scheduler without CUDA, a model, or the llama.cpp submodule:
+
+```bash
+cmake -S . -B build-scheduler -DCMAKE_BUILD_TYPE=Release -DSUTRA_ENABLE_LLAMA=OFF
+cmake --build build-scheduler --parallel 4
+ctest --test-dir build-scheduler --output-on-failure --no-tests=error
+./build-scheduler/sutra_scheduler_demo
+```
+
+The demo uses synthetic replies and does not measure inference or networking performance. `SUTRA_ENABLE_LLAMA=ON` explicitly fails until the worker/backend integration is implemented.

@@ -1,6 +1,6 @@
 # Sutra: delivery plan, deliverables, and transaction specification
 
-Prepared 24 October 2026; updated after reviewing the parent CourseMaterial folder. Based on the two-page project proposal and checkout `e3a4a53`. **Existing** means present in this checkout; **proposed** means a design decision to agree and implement. No PACE job or performance result was verified during this review. The local course schedule lists a tentative December 8, 2026 deadline; confirm current announcements and the rubric. See `IMPLEMENTATION_GUIDE.md` for calendar milestones and `notebooks/Sutra_PACE_ICE_Demo.ipynb` for execution/prechecks.
+Prepared 24 October 2026; scheduler implementation and teammate handoff updated 28 October 2026. Initial inventory was based on checkout `e3a4a53`; the current scheduler work builds on `e806735`. **Existing** means present in this checkout unless a separate branch is named; **proposed** means still to agree and implement. No PACE job or GPU performance result was verified during this work. The local course schedule lists a tentative December 8, 2026 deadline; confirm current announcements and the rubric. See section 10 for the implemented scheduler API, verification and Jayani/Dhruv integration tasks; see `IMPLEMENTATION_GUIDE.md` for ICE setup.
 
 ## 1. What we are building
 
@@ -31,7 +31,9 @@ Each worker holds a full model replica and processes different requests. Start o
 | Shared contract | `common/inference_types.hpp` defines requests, responses, vector batch aliases | Freeze semantics, validation, wire format, timing ownership |
 | Engine interface | `inference/inference_engine.hpp` defines `loadModel`, `generatesingle`, `generatefullBatch` | Mock engine and real model execution |
 | Workload generation | `benchmark/workload_generator.cpp` implements prompt/file/uniform/mixed workloads; config header exists | Validate negative counts/limits; tokenize to measure actual lengths; build client and runner |
-| Build/runtime | `CMakeLists.txt`, worker, metrics, runner, and test files are empty; LlamaEngine files contain comments only | Implement build and runtime; router/scheduler directories are absent |
+| Scheduler | `scheduler/scheduler.hpp/.cpp`: bounded admission, FIFO/priority+aging, count/timer batching, readiness, round-robin/least-loaded, reservations, deadlines, heartbeat expiry, disconnects and shutdown | Wire into Jayani's coordinator and Dhruv's workers; verify actual TCP/GPU behavior |
+| Build/tests | CMake builds `sutra_scheduler`, `sutra_scheduler_demo`, and `sutra_scheduler_tests` without external dependencies; 21 scheduler cases pass locally | Add coordinator/client/worker targets and optional llama linkage; run on ICE and Linux ThreadSanitizer |
+| Other runtime | Worker, metrics, runner and original worker-test files remain empty; LlamaEngine files contain comments only. Jayani's `origin/feature/tcp-router` at `098383a` adds a sequential loopback TCP echo server; it is reviewed but not merged here | Complete networking/framing, model execution, metrics and end-to-end tests; preserve Jayani's branch |
 | Dependency | `.gitmodules` points to llama.cpp; recorded revision `9d1e03616efb7520514d65552c7376296ef9208f` | Initialize submodule; verify API/toolchain compatibility before changing revision |
 | PACE baseline | README reports V100 16 GB, CUDA 12.6, Qwen2.5-0.5B-Instruct Q4_K_M, CPU/GPU microbenchmarks | Reproduce and preserve commands, environment, and raw results; these are reported, not locally verified |
 
@@ -212,3 +214,74 @@ Every run bundle: coordinator/submodule commits, model source/revision/SHA-256, 
 - [ ] M5: Update README with build/run commands, architecture, ownership and actual implemented status; tag the tested submission commit.
 
 The submission is complete when another teammate can use the documented ICE allocation/build/run procedure to reproduce correct concurrent serving, scheduling and failure behavior, and regenerate every reported chart from preserved measurements.
+
+## 10. Scheduler delivery and teammate handoff — 28 October 2026
+
+### Aashish: implemented component and remaining integration
+
+The scheduler component is implemented in `scheduler/scheduler.hpp` and `scheduler/scheduler.cpp`. `examples/scheduler_demo.cpp` exercises two synthetic workers without networking or model inference. No code on Jayani's or Dhruv's branches was replaced. No shared request/response fields, engine interfaces, llama.cpp revision or benchmark-owned configuration types were changed. The initial CMake file was empty; the new build only covers the scheduler. Extend it with additional targets during integration instead of replacing it.
+
+Implemented: bounded queued/outstanding admission; input and active-ID validation; FIFO; priority 2 > 1 > 0 with FIFO ties; oldest-admitted aged-request promotion; count/timer candidate batches; worker readiness; bounded request and batch reservations; round-robin; least outstanding requests with round-robin ties; per-response capacity release; correlation and duplicate/late-response suppression; queued/in-flight request deadlines; heartbeat expiry; disconnect failures; immediate idempotent shutdown; condition-variable dispatch/completion waits; coordinator queue/latency measurements; invalid numeric worker-metric rejection. The outstanding limit includes uncollected terminal events, bounding the internal completion outbox.
+
+These are scheduler-component results, not a completed M1/M3 network service or a true GPU batching result. Aashish's integration work remains: connect the coordinator, verify FIFO/priority and worker policies over TCP, run killed-worker and real-GPU tests, and measure/tune settings. Actual tokenizer/KV admission, independent GPU sequences and continuous slot replacement remain joint M4 work with Dhruv; request aggregation is not GPU batching.
+
+### Concrete API to use
+
+Include `scheduler/scheduler.hpp` and link `sutra_scheduler`. All public calls synchronize internal state; no socket/model callbacks execute under its mutex. One coordinator owns one scheduler and one dispatch loop. Returned values own their data; do transport work after the call returns.
+
+| Operation | Integration contract |
+|---|---|
+| `Scheduler(SchedulerConfig)` | Defaults: queue 1024, total retained requests 4096, batch 4, wait 10 ms, aging 1 s, request deadline 120 s, heartbeat deadline 3 s, prompt limit 16 KiB; default policies FIFO/round-robin. Timers must be positive except batch wait/aging may be zero |
+| `submit(request)` | Router supplies a nonzero coordinator-run-unique ID, nonempty prompt, 1–512 output tokens, priority 0–2 and nonnegative epoch timestamp. Scheduler copies/moves the request without changing fields. Return status is `accepted`, `invalid_request`, `duplicate_request`, `queue_full`, `outstanding_full`, or `stopped`. Rejections have NO completion event: router replies immediately |
+| `registerWorker({id, request_capacity, max_batch_size, batch_capacity})` | Call only on the identified current connection after model-ready. ID >= 0; all capacities positive. Duplicate live IDs rejected. Defaults `{id,4,4,1}`: up to four assigned requests in one batch. Advertise `{id,1,1,1}` for initial single-request integration. These are request counts, not tokens or GPU memory |
+| `setWorkerReady(id, false/true)` | Stop/resume new dispatches without discarding existing assignments. Does not refresh heartbeat or change configured capacity. To change capacity, drain, remove, then re-register a fresh session |
+| `heartbeat(id)` | Refresh current registered session. Returns false for unknown/expired sessions; never silently resurrects an expired worker. Send heartbeats while inference runs; output responses do not refresh heartbeat automatically |
+| `waitForDispatch()` / `tryDispatch()` | Returns `DispatchBatch{batch_id, worker_id, requests}` with capacity already reserved. Candidate count is limited by scheduler maximum, worker maximum and remaining request slots. Batch wait starts at the oldest queued request; full candidates dispatch early. A busy system can wait longer than the collection timer |
+| `complete(batch_id, worker_id, response)` | Worker response must retain request ID and set matching worker ID. Match all three identifiers. Accept individual results in any order. `false` means unknown/stale/duplicate/wrong-worker result, with no capacity release. `true` consumes one result, even if malformed numeric metrics are converted into `invalid_response` |
+| `removeWorker(id, reason)` | Use for disconnect, send failure, or uncertain delivery. Fails all still-assigned requests once and removes session; queued/unrelated worker requests remain. Never automatically retry uncertain execution |
+| `waitForCompletion()` / `takeCompletions()` | Collect each accepted request's single terminal `Completion{response, code}` and route by request ID. Blocking consumer drives deadline timers; nonblocking consumer must call `poll()` regularly even with no traffic. Multiple consumers divide events; they do not each receive copies |
+| `shutdown()` | Immediate cancellation of queued/in-flight requests, reject new work, wake waiters, preserve terminal events for collection. Stop transport activity and join caller-owned threads before destroying scheduler. `waitForCompletion()` drains buffered events before returning empty |
+
+The scheduler does not retain a lifetime history of completed request IDs: IDs remain reserved until their terminal event is collected, then memory is freed. **The router must never reuse IDs within a coordinator run.** Batch IDs increase for the scheduler's lifetime, including worker reconnects. Explicit `TimePoint` parameters exist for deterministic tests; production should omit them and use `steady_clock`. If passing the router acceptance time to `submit`, it must be from the same coordinator's steady clock. Admission/FIFO ties follow mutex-protected insertion order.
+
+Safety on in-flight timeout: the scheduler retires the whole worker session. Expired requests receive `request_timeout`; other still-assigned requests on that session receive `worker_unavailable` (or `worker_timeout` if heartbeats also expired). This avoids freeing capacity on a GPU that may still be executing. Jayani must close/quarantine that connection; Dhruv must confirm cancellation/drain or restart before new model-ready registration. Timed-out queued requests have worker ID -1. A stale connection's heartbeat/disconnect MUST be filtered by Jayani's connection-generation map before calling scheduler methods keyed by worker ID; otherwise it could affect a newly registered session with that numeric ID. Late old results are additionally rejected by batch ID.
+
+### Jayani: expected changes and checks
+
+- [ ] Keep `router/tcp_server.cpp` as the starting point for transport; its `098383a` echo prototype is still on `feature/tcp-router`, not merged into this checkout. Extend/refactor on your branch without adding scheduler policy or model code to socket loops.
+- [ ] Implement section 6 framing: four-byte network-order length, UTF-8 JSON envelopes, bounded payloads, complete read/write loops (including interrupted calls), malformed/truncated frame errors and concurrent clients. Current single `recv()`/sequential handling is insufficient. Keep loopback for same-node tests; configure bind/connect addresses before cross-node work.
+- [ ] Generate authoritative IDs/timestamps, maintain pending-ID-to-client and current-worker-connection-generation maps, call `submit`, handle every rejection immediately, and collect terminal events even when no worker response arrives. Deliver one terminal reply where the client connection is still available.
+- [ ] Run a dispatch loop: call `waitForDispatch`, serialize batch ID as a decimal string, worker ID and requests, then send OUTSIDE scheduler calls. A send failure means uncertain execution: `removeWorker` on that current session, with no automatic retry. Add serialization/dispatch-failure containment so an exception cannot leave a reserved batch stranded until its deadline.
+- [ ] Read worker ready/heartbeat/result messages; call `registerWorker`, `heartbeat`, `complete` on the matching current session. Add `batch_id` to the result envelope without changing `InferenceResponse`. Ignore stale connections. On scheduler retirement, close/quarantine the old connection; never allow an old close/heartbeat to act on a replacement session.
+- [ ] Return `toString(Completion.code)` as stable error/status metadata; finalize any extra router-acceptance/client-send timing separately. The scheduler's `latency_ms` is submit-to-result-ready, not socket-send duration.
+- [ ] Coordinate CMake additions for coordinator and transport tests. Verify fragmented/coalesced frames, 8 concurrent clients/100 requests, client disconnects, queue/outbox backpressure, worker disconnects/timeouts, stale reconnect traffic and exactly one terminal outcome per accepted request.
+
+### Dhruv: expected changes and checks
+
+- [ ] Implement deterministic mock and real `InferenceEngine`/worker paths using the existing shared types. Load a model once; send ready only after successful loading. Start with `{id,1,1,1}`; advertise larger request/batch limits only after corresponding processing works.
+- [ ] Parse `DispatchBatch.requests` into `RequestBatch`, preserve request IDs, and echo the envelope batch ID on EACH result (or unpack a result array into individual scheduler completions). Set `response.worker_id` to the assigned worker ID. Exactly one response for every request, including model/validation failures.
+- [ ] Keep one execution owner per llama context. Default one in-flight batch; any larger `batch_capacity` needs an explicit bounded serial queue or safe independent contexts. Run heartbeat I/O independently of a long inference call; proposed cadence 1 s, scheduler timeout 3 s. Timer settings are starting values to tune, not measured guarantees.
+- [ ] Tokenize formatted prompts, enforce actual input+output context and total token/KV budgets, split candidate groups if needed, and record effective GPU batch sizes. Scheduler count/timer aggregation does not replace tokenizer admission or implement simultaneous GPU sequences.
+- [ ] Report finite, nonnegative token counts/timings/rates. Set worker `queue_time_ms` ONLY to local receipt-to-execution waiting; scheduler adds its own enqueue-to-dispatch time once. Keep engine `inference_time_ms` and TTFT local; scheduler replaces `latency_ms` with coordinator elapsed time. Failed/undefined metrics need the agreed envelope validity metadata; no cross-host epoch subtraction.
+- [ ] Handle retired-session cancellation/drain/restart before reconnect. Do not send a new ready just because the scheduler deadline elapsed while old model work is still running.
+- [ ] Extend CMake rather than replace scheduler targets. `SUTRA_ENABLE_LLAMA=OFF` is working; `ON` deliberately errors until real backend linkage exists. Map benchmark `SchedulingPolicy::FIFO/PRIORITY` explicitly to `QueuePolicy::Fifo/Priority` (existing benchmark types are unchanged), and expose worker-policy/batch settings in benchmark metadata.
+- [ ] Add worker/model isolation and failure tests, then one/two-GPU tests and benchmark CSV/manifests. Verify real offload, true sequence isolation and throughput separately from the synthetic scheduler demonstration.
+
+### Integration order, branch preservation and evidence
+
+1. Review this API and the shared wire envelope together. Start with batch size 1 and one mock worker, then four candidates and two workers.
+2. Integrate feature branches via reviewed merges/PRs; no force pushes or copying whole files over teammate work. The `.gitignore` edits conflict with Jayani's append: retain both sets, deduplicate `/router/tcp_server`, and keep the personal learning-guide exclusion. Existing `build*/` covers `/build/`.
+3. Extend CMake and run component tests on every integration. Keep CPU scheduler builds independent of CUDA and dependency downloads.
+4. Complete full mock TCP transaction, faults/reconnect tests, real GPU path, then GPU batching/scaling. Do not mark combined milestone checkboxes complete solely because scheduler unit tests pass.
+
+Verified locally on Windows with MinGW GCC 16.1.0, CMake 3.29.2, Ninja, Release: build succeeds; CTest scheduler suite passes all 21 named cases, including 8 producer threads and 128 unique successful completions; synthetic demo completes 8/8 requests across workers 0 and 1. `git diff --check` passes. No Linux/ICE/CUDA/TCP integration or ThreadSanitizer run is claimed.
+
+```bash
+# Linux / ICE allocated CPU session; no CUDA, model or submodule needed.
+cmake -S . -B build-scheduler -DCMAKE_BUILD_TYPE=Release -DSUTRA_ENABLE_LLAMA=OFF
+cmake --build build-scheduler --parallel 4
+ctest --test-dir build-scheduler --output-on-failure --no-tests=error
+./build-scheduler/sutra_scheduler_demo
+```
+
+For a future supported Linux GCC/Clang race check, use a separate build with `-DCMAKE_CXX_FLAGS="-fsanitize=thread -g"` and `-DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"`, then run the same CTest suite. This check remains pending; the local Windows build does not establish race freedom on ICE.
