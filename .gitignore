@@ -1,3 +1,6 @@
 build-llama/
 models/
 results/
+build*/
+__pycache__/
+.ipynb_checkpoints/

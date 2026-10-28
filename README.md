@@ -2,6 +2,8 @@
 
 **Sutra** is a multithreaded and distributed C++ framework for efficient LLM inference. It uses CUDA and multiple GPU workers to improve inference performance while supporting concurrent requests, batching, scheduling, load balancing, monitoring, and fault handling.
 
+Planning and execution: [delivery plan and checklist](PROJECT_DELIVERY_PLAN.md), [step-by-step implementation guide](IMPLEMENTATION_GUIDE.md), and [PACE-ICE precheck/demo notebook](notebooks/Sutra_PACE_ICE_Demo.ipynb). The notebook can probe the environment and run an optional llama.cpp baseline now; the Sutra runtime/demo stages remain pending implementation.
+
 ## Team Integration Guide
 
 Sutra is divided into three independently developed subsystems:

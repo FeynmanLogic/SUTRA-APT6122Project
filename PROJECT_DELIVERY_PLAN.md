@@ -1,6 +1,6 @@
 # Sutra: delivery plan, deliverables, and transaction specification
 
-Prepared 24 October 2026. Based on the two-page project proposal and checkout `e3a4a53`. **Existing** means present in this checkout; **proposed** means a design decision to agree and implement. No PACE job or performance result was verified during this review. Dates below are relative because the submission deadline and rubric were not supplied.
+Prepared 24 October 2026; updated after reviewing the parent CourseMaterial folder. Based on the two-page project proposal and checkout `e3a4a53`. **Existing** means present in this checkout; **proposed** means a design decision to agree and implement. No PACE job or performance result was verified during this review. The local course schedule lists a tentative December 8, 2026 deadline; confirm current announcements and the rubric. See `IMPLEMENTATION_GUIDE.md` for calendar milestones and `notebooks/Sutra_PACE_ICE_Demo.ipynb` for execution/prechecks.
 
 ## 1. What we are building
 
@@ -59,6 +59,8 @@ Scope gates: deliver all listed proposal features, including dynamic batching. C
 ## 4. PACE-ICE dependencies and operating plan
 
 Georgia Tech's current public resource page identifies ICE as RHEL 9/x86_64 with NVIDIA **and** AMD GPUs. This project targets NVIDIA/CUDA. The detailed resource link redirects to GT authentication, so partition names, account/QoS requirements, module versions, GPU limits, storage paths, and walltimes remain **environment checks**, not assumed facts. [GT resource page](https://sox.cc.gatech.edu/facilities/instructional-labs/academic-hpc-resources), [authenticated ICE guide](https://gatech.service-now.com/home?id=kb_article_view&sysparm_article=KB0042095).
+
+Local course instructions add a concrete starting workflow: Open OnDemand GPU Jupyter/VS Code, `module load cuda`, a system C++ compiler, Release builds, and `pace-quota`. The CUDA starter notebook specifically excludes the `ece4122-6122` conda build environment; follow that CUDA-specific guidance rather than the generic course conda setup. The new implementation guide records the exact local source files and setup cells. Verify the active module/compiler/GPU in the allocated job.
 
 | Dependency | Concrete action and evidence | If unavailable |
 |---|---|---|
