@@ -18,13 +18,12 @@ add_subdirectory(
     external/llama.cpp
     external/llama-build
 )
-
 add_executable(
     sutra_worker
     worker/worker_main.cpp
+    worker/worker.cpp
     inference/llama_engine.cpp
 )
-
 target_include_directories(
     sutra_worker
     PRIVATE
