@@ -38,6 +38,9 @@ private:
         std::int32_t token_count,
         llama_pos starting_position
     );
+    std::string formatPrompt(
+    const std::string& prompt
+) const;
 
     std::string tokenToText(llama_token token) const;
 

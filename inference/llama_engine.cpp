@@ -161,6 +161,111 @@ std::string LlamaEngine::tokenToText(
     );
 }
 
+std::string LlamaEngine::formatPrompt(
+    const std::string& prompt
+) const {
+    if (model_ == nullptr) {
+        throw std::runtime_error(
+            "Cannot format prompt without a loaded model."
+        );
+    }
+
+    const char* chat_template =
+        llama_model_chat_template(
+            model_,
+            nullptr
+        );
+
+    if (chat_template == nullptr) {
+        throw std::runtime_error(
+            "The model does not contain a chat template."
+        );
+    }
+
+    const llama_chat_message message = {
+        "user",
+        prompt.c_str()
+    };
+
+    int formatted_length =
+        llama_chat_apply_template(
+            chat_template,
+            &message,
+            1,
+            true,
+            nullptr,
+            0
+        );
+
+    if (formatted_length < 0) {
+        throw std::runtime_error(
+            "Failed to determine formatted prompt size."
+        );
+    }
+
+    std::vector<char> formatted_buffer(
+        static_cast<std::size_t>(
+            formatted_length
+        )
+    );
+
+    formatted_length =
+        llama_chat_apply_template(
+            chat_template,
+            &message,
+            1,
+            true,
+            formatted_buffer.data(),
+            static_cast<std::int32_t>(
+                formatted_buffer.size()
+            )
+        );
+
+    if (formatted_length < 0) {
+        throw std::runtime_error(
+            "Failed to apply the model chat template."
+        );
+    }
+
+    if (
+        formatted_length >
+        static_cast<int>(formatted_buffer.size())
+    ) {
+        formatted_buffer.resize(
+            static_cast<std::size_t>(
+                formatted_length
+            )
+        );
+
+        formatted_length =
+            llama_chat_apply_template(
+                chat_template,
+                &message,
+                1,
+                true,
+                formatted_buffer.data(),
+                static_cast<std::int32_t>(
+                    formatted_buffer.size()
+                )
+            );
+
+        if (formatted_length < 0) {
+            throw std::runtime_error(
+                "Failed to resize formatted prompt."
+            );
+        }
+    }
+
+    return std::string(
+        formatted_buffer.data(),
+        static_cast<std::size_t>(
+            formatted_length
+        )
+    );
+}
+
+//how to handle one single request 
+
 InferenceResponse LlamaEngine::generatesingle(
     const InferenceRequest& request
 ) {
@@ -203,12 +308,13 @@ InferenceResponse LlamaEngine::generatesingle(
             llama_get_memory(context_),
             true
         );
-
+        const std::string formatted_prompt =
+    formatPrompt(request.prompt);
         const int prompt_token_count =
             -llama_tokenize(
                 vocabulary_,
-                request.prompt.c_str(),
-                request.prompt.size(),
+               formatted_prompt.c_str(),
+formatted_prompt.size(),
                 nullptr,
                 0,
                 true,
@@ -238,8 +344,8 @@ InferenceResponse LlamaEngine::generatesingle(
         const int tokenization_result =
             llama_tokenize(
                 vocabulary_,
-                request.prompt.c_str(),
-                request.prompt.size(),
+                formatted_prompt.c_str(),
+        formatted_prompt.size(),
                 prompt_tokens.data(),
                 prompt_tokens.size(),
                 true,
