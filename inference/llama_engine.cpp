@@ -269,52 +269,82 @@ std::string LlamaEngine::formatPrompt(
 InferenceResponse LlamaEngine::generatesingle(
     const InferenceRequest& request
 ) {
-    std::lock_guard<std::mutex> lock(inference_mutex_);
+    /*
+     * Start before acquiring the mutex. This allows total latency
+     * and TTFT to include time spent waiting behind another request.
+     */
+    const auto request_start =
+        std::chrono::steady_clock::now();
+
+    std::lock_guard<std::mutex> lock(
+        inference_mutex_
+    );
+
+    const auto inference_start =
+        std::chrono::steady_clock::now();
 
     InferenceResponse response;
     response.request_id = request.request_id;
 
-    const auto start =
-        std::chrono::steady_clock::now();
-
-    if (model_ == nullptr ||
-        context_ == nullptr ||
-        vocabulary_ == nullptr) {
-        response.success = false;
-        response.error_message =
-            "The model has not been loaded.";
-        return response;
-    }
-
-    if (request.prompt.empty()) {
-        response.success = false;
-        response.error_message =
-            "The prompt cannot be empty.";
-        return response;
-    }
-
-    if (request.max_new_tokens <= 0) {
-        response.success = false;
-        response.error_message =
-            "max_new_tokens must be positive.";
-        return response;
-    }
+    response.queue_time_ms =
+        std::chrono::duration<
+            double,
+            std::milli
+        >(
+            inference_start -
+            request_start
+        ).count();
 
     llama_sampler* sampler = nullptr;
     llama_batch_ext* batch = nullptr;
 
     try {
+        if (
+            model_ == nullptr ||
+            context_ == nullptr ||
+            vocabulary_ == nullptr
+        ) {
+            throw std::runtime_error(
+                "The model has not been loaded."
+            );
+        }
+
+        if (request.prompt.empty()) {
+            throw std::invalid_argument(
+                "The prompt cannot be empty."
+            );
+        }
+
+        if (request.max_new_tokens <= 0) {
+            throw std::invalid_argument(
+                "max_new_tokens must be positive."
+            );
+        }
+
+        /*
+         * Convert the ordinary user prompt into the chat format
+         * expected by the loaded model.
+         */
+        const std::string formatted_prompt =
+            formatPrompt(request.prompt);
+
+        /*
+         * Clear tokens and attention state left by the previous
+         * request. The model weights remain loaded.
+         */
         llama_memory_clear(
             llama_get_memory(context_),
             true
         );
-        const std::string formatted_prompt =
-    formatPrompt(request.prompt);
+
+        /*
+         * First call determines the required number of prompt tokens.
+         */
         const int prompt_token_count =
             -llama_tokenize(
                 vocabulary_,
-               formatted_prompt.c_str(),
-formatted_prompt.size(),
+                formatted_prompt.c_str(),
+                formatted_prompt.size(),
                 nullptr,
                 0,
                 true,
@@ -329,25 +359,33 @@ formatted_prompt.size(),
 
         if (
             prompt_token_count +
-            request.max_new_tokens >
+                request.max_new_tokens >
             static_cast<int>(context_size_)
         ) {
             throw std::runtime_error(
-                "Prompt and output exceed context size."
+                "Prompt and generated output exceed "
+                "the configured context size."
             );
         }
 
         std::vector<llama_token> prompt_tokens(
-            prompt_token_count
+            static_cast<std::size_t>(
+                prompt_token_count
+            )
         );
 
+        /*
+         * Second call performs the actual tokenization.
+         */
         const int tokenization_result =
             llama_tokenize(
                 vocabulary_,
                 formatted_prompt.c_str(),
-        formatted_prompt.size(),
+                formatted_prompt.size(),
                 prompt_tokens.data(),
-                prompt_tokens.size(),
+                static_cast<int>(
+                    prompt_tokens.size()
+                ),
                 true,
                 true
             );
@@ -358,8 +396,13 @@ formatted_prompt.size(),
             );
         }
 
-        response.input_tokens = prompt_token_count;
+        response.input_tokens =
+            tokenization_result;
 
+        /*
+         * Use deterministic greedy decoding for reproducible
+         * benchmark results.
+         */
         llama_sampler_chain_params sampler_parameters =
             llama_sampler_chain_default_params();
 
@@ -369,6 +412,12 @@ formatted_prompt.size(),
             sampler_parameters
         );
 
+        if (sampler == nullptr) {
+            throw std::runtime_error(
+                "Failed to create token sampler."
+            );
+        }
+
         llama_sampler_chain_add(
             sampler,
             llama_sampler_init_greedy()
@@ -376,10 +425,19 @@ formatted_prompt.size(),
 
         batch = llama_batch_ext_init(context_);
 
+        if (batch == nullptr) {
+            throw std::runtime_error(
+                "Failed to create llama.cpp batch."
+            );
+        }
+
+        /*
+         * Submit all prompt tokens together.
+         */
         setBatchTokens(
             batch,
             prompt_tokens.data(),
-            prompt_token_count,
+            response.input_tokens,
             0
         );
 
@@ -396,7 +454,7 @@ formatted_prompt.size(),
         }
 
         llama_pos next_position =
-            prompt_token_count;
+            response.input_tokens;
 
         bool first_token_recorded = false;
 
@@ -411,6 +469,10 @@ formatted_prompt.size(),
                     -1
                 );
 
+            /*
+             * Stop when the model produces its end-of-generation
+             * token.
+             */
             if (
                 llama_vocab_is_eog(
                     vocabulary_,
@@ -425,6 +487,10 @@ formatted_prompt.size(),
 
             ++response.generated_tokens;
 
+            /*
+             * TTFT includes both mutex waiting time and prompt
+             * processing time.
+             */
             if (!first_token_recorded) {
                 const auto first_token_time =
                     std::chrono::steady_clock::now();
@@ -434,10 +500,22 @@ formatted_prompt.size(),
                         double,
                         std::milli
                     >(
-                        first_token_time - start
+                        first_token_time -
+                        request_start
                     ).count();
 
                 first_token_recorded = true;
+            }
+
+            /*
+             * There is no reason to evaluate the last generated
+             * token when no additional token will be requested.
+             */
+            if (
+                response.generated_tokens >=
+                request.max_new_tokens
+            ) {
+                break;
             }
 
             setBatchTokens(
@@ -455,35 +533,69 @@ formatted_prompt.size(),
                 ) != 0
             ) {
                 throw std::runtime_error(
-                    "Token evaluation failed."
+                    "Generated-token evaluation failed."
                 );
             }
 
             ++next_position;
         }
 
-        const auto finish =
+        const auto inference_finish =
             std::chrono::steady_clock::now();
 
         response.inference_time_ms =
             std::chrono::duration<
                 double,
                 std::milli
-            >(finish - start).count();
+            >(
+                inference_finish -
+                inference_start
+            ).count();
 
         response.latency_ms =
-            response.inference_time_ms;
+            std::chrono::duration<
+                double,
+                std::milli
+            >(
+                inference_finish -
+                request_start
+            ).count();
 
         if (response.inference_time_ms > 0.0) {
             response.tokens_per_second =
                 response.generated_tokens /
-                (response.inference_time_ms / 1000.0);
+                (
+                    response.inference_time_ms /
+                    1000.0
+                );
         }
 
         response.success = true;
     } catch (const std::exception& exception) {
+        const auto failure_time =
+            std::chrono::steady_clock::now();
+
+        response.inference_time_ms =
+            std::chrono::duration<
+                double,
+                std::milli
+            >(
+                failure_time -
+                inference_start
+            ).count();
+
+        response.latency_ms =
+            std::chrono::duration<
+                double,
+                std::milli
+            >(
+                failure_time -
+                request_start
+            ).count();
+
         response.success = false;
-        response.error_message = exception.what();
+        response.error_message =
+            exception.what();
     }
 
     if (batch != nullptr) {

@@ -18,20 +18,26 @@ add_subdirectory(
     external/llama.cpp
     external/llama-build
 )
+find_package(Threads REQUIRED)
+
 add_executable(
-    sutra_worker
-    worker/worker_main.cpp
+    sutra_benchmark
+    benchmark/benchmark_client.cpp
+    benchmark/benchmark_runner.cpp
+    benchmark/workload_generator.cpp
     worker/worker.cpp
     inference/llama_engine.cpp
 )
+
 target_include_directories(
-    sutra_worker
+    sutra_benchmark
     PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_link_libraries(
-    sutra_worker
+    sutra_benchmark
     PRIVATE
     llama
+    Threads::Threads
 )
