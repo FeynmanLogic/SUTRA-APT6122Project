@@ -1,4 +1,4 @@
-//Written by Dhruv Kulkarni, 6122APT, last modified on Nov 10
+//Written by Dhruv Kulkarni, 6122APT, last modified on Nov 12
 
 
 #include "benchmark_config.hpp"
@@ -8,7 +8,7 @@
 #include "../inference/llama_engine.hpp"
 #include "../worker/worker.hpp"
 
-#include <cstdlib>
+#include <exception>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -19,19 +19,84 @@ namespace {
 void printUsage(const char* program) {
     std::cout
         << "Usage:\n"
-        << program
+        << "  " << program
         << " --model <model.gguf> [options]\n\n"
-        << "Options:\n"
+
+        << "Required:\n"
+        << "  --model file.gguf\n\n"
+
+        << "Inference options:\n"
         << "  --backend cpu|cuda\n"
         << "  --requests N\n"
         << "  --warmup N\n"
         << "  --concurrency N\n"
-        << "  --batch-size N\n"
+        << "  --batch-size N\n\n"
+
+        << "Workload options:\n"
         << "  --prompt \"text\"\n"
         << "  --prompt-file file.txt\n"
-        << "  --mixed\n"
+        << "  --mixed\n\n"
+
+        << "Benchmark output:\n"
         << "  --output file.csv\n"
-        << "  --run-id name\n";
+        << "  --run-id name\n\n"
+
+        << "GPU monitoring:\n"
+        << "  --gpu-monitor\n"
+        << "  --gpu-output file.csv\n"
+        << "  --gpu-interval-ms N\n\n"
+
+        << "Other:\n"
+        << "  --help, -h\n";
+}
+
+void validateConfig(
+    const sutra::BenchmarkConfig& config
+) {
+    if (config.model_path.empty()) {
+        throw std::invalid_argument(
+            "A model path is required."
+        );
+    }
+
+    if (config.total_requests <= 0) {
+        throw std::invalid_argument(
+            "Request count must be positive."
+        );
+    }
+
+    if (config.warmup_requests < 0) {
+        throw std::invalid_argument(
+            "Warm-up count cannot be negative."
+        );
+    }
+
+    if (config.concurrency <= 0) {
+        throw std::invalid_argument(
+            "Concurrency must be positive."
+        );
+    }
+
+    if (config.batch_size <= 0) {
+        throw std::invalid_argument(
+            "Batch size must be positive."
+        );
+    }
+
+    if (config.gpu_sample_interval_ms <= 0) {
+        throw std::invalid_argument(
+            "GPU sampling interval must be positive."
+        );
+    }
+
+    if (
+        config.enable_gpu_monitor &&
+        config.backend != sutra::Backend::CUDA
+    ) {
+        throw std::invalid_argument(
+            "GPU monitoring requires the CUDA backend."
+        );
+    }
 }
 
 }  // namespace
@@ -40,26 +105,32 @@ int main(int argc, char* argv[]) {
     try {
         sutra::BenchmarkConfig config;
 
-        for (int index = 1;
-             index < argc;
-             ++index) {
+        for (
+            int index = 1;
+            index < argc;
+            ++index
+        ) {
             const std::string argument =
                 argv[index];
 
-            auto nextValue = [&]() -> std::string {
-                if (index + 1 >= argc) {
-                    throw std::runtime_error(
-                        "Missing value for " +
-                        argument
-                    );
-                }
+            auto nextValue =
+                [&]() -> std::string {
+                    if (index + 1 >= argc) {
+                        throw std::runtime_error(
+                            "Missing value for " +
+                            argument
+                        );
+                    }
 
-                return argv[++index];
-            };
+                    return argv[++index];
+                };
 
             if (argument == "--model") {
-                config.model_path = nextValue();
-            } else if (argument == "--backend") {
+                config.model_path =
+                    nextValue();
+            } else if (
+                argument == "--backend"
+            ) {
                 const std::string backend =
                     nextValue();
 
@@ -74,10 +145,14 @@ int main(int argc, char* argv[]) {
                         "Backend must be cpu or cuda."
                     );
                 }
-            } else if (argument == "--requests") {
+            } else if (
+                argument == "--requests"
+            ) {
                 config.total_requests =
                     std::stoi(nextValue());
-            } else if (argument == "--warmup") {
+            } else if (
+                argument == "--warmup"
+            ) {
                 config.warmup_requests =
                     std::stoi(nextValue());
             } else if (
@@ -90,19 +165,44 @@ int main(int argc, char* argv[]) {
             ) {
                 config.batch_size =
                     std::stoi(nextValue());
-            } else if (argument == "--prompt") {
-                config.prompt = nextValue();
+            } else if (
+                argument == "--prompt"
+            ) {
+                config.prompt =
+                    nextValue();
             } else if (
                 argument == "--prompt-file"
             ) {
                 config.prompt_file =
                     nextValue();
-            } else if (argument == "--mixed") {
+            } else if (
+                argument == "--mixed"
+            ) {
                 config.mixed_workload = true;
-            } else if (argument == "--output") {
-                config.output_csv = nextValue();
-            } else if (argument == "--run-id") {
-                config.run_id = nextValue();
+            } else if (
+                argument == "--output"
+            ) {
+                config.output_csv =
+                    nextValue();
+            } else if (
+                argument == "--run-id"
+            ) {
+                config.run_id =
+                    nextValue();
+            } else if (
+                argument == "--gpu-monitor"
+            ) {
+                config.enable_gpu_monitor = true;
+            } else if (
+                argument == "--gpu-output"
+            ) {
+                config.gpu_metrics_csv =
+                    nextValue();
+            } else if (
+                argument == "--gpu-interval-ms"
+            ) {
+                config.gpu_sample_interval_ms =
+                    std::stoi(nextValue());
             } else if (
                 argument == "--help" ||
                 argument == "-h"
@@ -122,37 +222,59 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        validateConfig(config);
+
         sutra::WorkloadGenerator generator(
             config.random_seed
         );
 
         sutra::RequestBatch requests;
 
+        /*
+         * Workload priority:
+         *
+         * 1. Direct prompt
+         * 2. Prompt file
+         * 3. Mixed synthetic workload
+         * 4. Default uniform workload
+         */
         if (!config.prompt.empty()) {
-            requests = generator.fromPrompt(
-                config.prompt,
-                config.total_requests,
-                config.max_new_tokens
-            );
-        } else if (!config.prompt_file.empty()) {
-            requests = generator.fromPromptFile(
-                config.prompt_file,
-                config.total_requests,
-                config.max_new_tokens
-            );
-        } else if (config.mixed_workload) {
-            requests = generator.generateMixed(
-                config.total_requests,
-                config.max_new_tokens
-            );
+            requests =
+                generator.fromPrompt(
+                    config.prompt,
+                    config.total_requests,
+                    config.max_new_tokens
+                );
+        } else if (
+            !config.prompt_file.empty()
+        ) {
+            requests =
+                generator.fromPromptFile(
+                    config.prompt_file,
+                    config.total_requests,
+                    config.max_new_tokens
+                );
+        } else if (
+            config.mixed_workload
+        ) {
+            requests =
+                generator.generateMixed(
+                    config.total_requests,
+                    config.max_new_tokens
+                );
         } else {
-            requests = generator.generateUniform(
-                config.total_requests,
-                config.approximate_prompt_tokens,
-                config.max_new_tokens
-            );
+            requests =
+                generator.generateUniform(
+                    config.total_requests,
+                    config.approximate_prompt_tokens,
+                    config.max_new_tokens
+                );
         }
 
+        /*
+         * Zero GPU layers gives CPU-only execution.
+         * A large value requests complete GPU offloading.
+         */
         const int gpu_layers =
             config.backend ==
                     sutra::Backend::CUDA
@@ -162,7 +284,10 @@ int main(int argc, char* argv[]) {
         auto engine =
             std::make_unique<
                 sutra::LlamaEngine
-            >(gpu_layers, 4096);
+            >(
+                gpu_layers,
+                4096
+            );
 
         if (
             !engine->loadModel(
@@ -179,10 +304,15 @@ int main(int argc, char* argv[]) {
             std::move(engine)
         );
 
-        sutra::BenchmarkRunner runner(worker);
+        sutra::BenchmarkRunner runner(
+            worker
+        );
 
         const sutra::BenchmarkSummary summary =
-            runner.run(requests, config);
+            runner.run(
+                requests,
+                config
+            );
 
         std::cout
             << "\nBenchmark complete\n"
@@ -192,26 +322,42 @@ int main(int argc, char* argv[]) {
             << summary.failed_requests
             << "\nWall time: "
             << summary.wall_time_seconds
-            << " seconds\nRequests/second: "
+            << " seconds"
+            << "\nRequests/second: "
             << summary.requests_per_second
             << "\nTokens/second: "
             << summary.tokens_per_second
             << "\nMean latency: "
             << summary.mean_latency_ms
-            << " ms\nP50 latency: "
+            << " ms"
+            << "\nP50 latency: "
             << summary.p50_latency_ms
-            << " ms\nP95 latency: "
+            << " ms"
+            << "\nP95 latency: "
             << summary.p95_latency_ms
-            << " ms\nP99 latency: "
+            << " ms"
+            << "\nP99 latency: "
             << summary.p99_latency_ms
-            << " ms\nP50 TTFT: "
+            << " ms"
+            << "\nP50 TTFT: "
             << summary.p50_ttft_ms
-            << " ms\nP95 TTFT: "
+            << " ms"
+            << "\nP95 TTFT: "
             << summary.p95_ttft_ms
-            << " ms\nCSV: "
-            << config.output_csv
-            << '\n';
-    } catch (const std::exception& exception) {
+            << " ms"
+            << "\nRequest CSV: "
+            << config.output_csv;
+
+        if (config.enable_gpu_monitor) {
+            std::cout
+                << "\nGPU CSV: "
+                << config.gpu_metrics_csv;
+        }
+
+        std::cout << '\n';
+    } catch (
+        const std::exception& exception
+    ) {
         std::cerr
             << "Benchmark failed: "
             << exception.what()

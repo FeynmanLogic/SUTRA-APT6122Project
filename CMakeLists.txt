@@ -25,10 +25,10 @@ add_executable(
     benchmark/benchmark_client.cpp
     benchmark/benchmark_runner.cpp
     benchmark/workload_generator.cpp
+    monitoring/gpu_monitor.cpp
     worker/worker.cpp
     inference/llama_engine.cpp
 )
-
 target_include_directories(
     sutra_benchmark
     PRIVATE
