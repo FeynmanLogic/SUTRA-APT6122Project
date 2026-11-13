@@ -5,3 +5,6 @@ build-sutra/
 
 /build/
 /router/tcp_server
+# Router development artifacts
+/router/tcp_server_backup.cpp
+/router/router_demo
