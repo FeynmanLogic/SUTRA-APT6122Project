@@ -1,7 +1,7 @@
 build-llama/
 models/
 results/
-/router/tcp_server
+build-sutra/
 
 /build/
 /router/tcp_server
