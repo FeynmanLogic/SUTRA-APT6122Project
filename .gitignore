@@ -7,3 +7,7 @@ __pycache__/
 
 # Personal learning notes; intentionally excluded from team commits.
 /SCHEDULER_LEARNING_GUIDE.local.md
+
+/router/tcp_server
+/router/tcp_server_backup.cpp
+/router/router_demo
