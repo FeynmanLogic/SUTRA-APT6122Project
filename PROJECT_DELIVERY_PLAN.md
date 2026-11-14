@@ -1,5 +1,7 @@
 # Sutra: delivery plan, deliverables, and transaction specification
 
+> Integration update, 14 November 2026: this document contains historical milestones and proposed distributed-runtime contracts. Use [INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md) for the implemented build, embedded-worker TCP path, validation status, and manual steps.
+
 Prepared 24 October 2026; scheduler implementation and teammate handoff updated 28 October 2026. Initial inventory was based on checkout `e3a4a53`; the current scheduler work builds on `e806735`. **Existing** means present in this checkout unless a separate branch is named; **proposed** means still to agree and implement. No PACE job or GPU performance result was verified during this work. The local course schedule lists a tentative December 8, 2026 deadline; confirm current announcements and the rubric. See section 10 for the implemented scheduler API, verification and Jayani/Dhruv integration tasks; see `IMPLEMENTATION_GUIDE.md` for ICE setup.
 
 ## 1. What we are building

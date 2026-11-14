@@ -2,6 +2,20 @@
 
 Sutra is a multithreaded and distributed C++ framework for efficient LLM inference. It integrates [llama.cpp](https://github.com/ggml-org/llama.cpp) for CUDA-accelerated model execution and provides interfaces for request routing, scheduling, batching, worker execution, benchmarking, and GPU monitoring.
 
+Integration status (14 November 2026): the scheduler, current `main` inference/benchmark code, and TCP-router branch are combined on `integration/scheduler-router-inference`. See [INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md) for local builds, PACE GPU validation, the wire protocol, and Git publishing steps. Earlier milestones remain in [PROJECT_DELIVERY_PLAN.md](PROJECT_DELIVERY_PLAN.md) and [IMPLEMENTATION_GUIDE.md](IMPLEMENTATION_GUIDE.md).
+
+## Quick local checks
+
+The core build requires no model, CUDA, or downloaded dependencies:
+
+```bash
+cmake -S . -B build-core -DCMAKE_BUILD_TYPE=Release
+cmake --build build-core --parallel 4
+ctest --test-dir build-core --output-on-failure --no-tests=error
+```
+
+Enable the TCP integration test with `-DSUTRA_BUILD_ROUTER=ON`. This requires nlohmann_json >= 3.11; CMake uses an installed package or downloads v3.11.3. See the integration guide for offline configuration and Windows compiler setup.
+
 ## Team
 
 | Subsystem | Owner | Primary responsibility |
@@ -313,6 +327,8 @@ Configure the project for the V100 GPU, which has CUDA compute capability 7.0:
 
 ```bash
 cmake -S . -B build-sutra \
+  -DSUTRA_ENABLE_LLAMA=ON \
+  -DSUTRA_BUILD_ROUTER=ON \
   -DGGML_CUDA=ON \
   -DCMAKE_CUDA_ARCHITECTURES=70 \
   -DCMAKE_BUILD_TYPE=Release
@@ -333,7 +349,7 @@ Run the worker or inference executable using the downloaded model:
   models/qwen2.5-0.5b-instruct-q4_k_m.gguf
 ```
 
-The exact worker arguments may change as router and scheduler integration is completed.
+This executable is a standalone worker smoke test. For TCP requests through the scheduler, run `sutra_router --backend llama --model <model.gguf> --gpu-layers 99`; see the integration guide.
 
 ## Running a Benchmark
 
@@ -400,7 +416,7 @@ to:
 --backend cpu
 ```
 
-## Verified Results
+## Previously Reported Results
 
 The following results were measured on one Tesla V100 using the Qwen2.5-0.5B-Instruct Q4_K_M model.
 
@@ -430,7 +446,7 @@ For 20 requests generating 64 tokens each:
 
 During the run, GPU utilization remained approximately 80 to 82%, model memory usage remained at approximately 1086 MiB, and GPU temperature remained between 47°C and 48°C.
 
-These results describe one inference worker using one llama.cpp context.
+These results were recorded on the earlier inference branch and describe one inference worker using one llama.cpp context. The benchmark calls the worker directly; it excludes TCP routing and scheduler queueing. Re-run on PACE before attributing these numbers to the integrated service.
 
 ## Concurrency Interpretation
 
@@ -465,20 +481,25 @@ Completed:
 - Background GPU monitoring
 - GPU metrics CSV output
 
-Integration work:
+Integrated on this branch:
 
-- TCP router connection
-- Scheduler-to-worker connection
-- Final shared wire protocol
-- End-to-end distributed execution
+- Scheduler admission, queue policies, batch formation, worker accounting, and deadlines
+- TCP -> scheduler -> `InferenceWorker` -> mock/llama engine -> TCP response path
+- Explicit `--backend mock|llama` selection; llama mode requires a successful model load
+- Windows and Linux socket support for `sutra_router`
+- Joined service/client threads with SIGINT/SIGTERM shutdown on Linux
+- Core, optional inference, worker smoke, benchmark, and router CMake targets
+- Scheduler, worker contract, and automated TCP integration tests
 
-Potential extensions:
+Remaining validation and extensions:
 
-- Multiple worker processes across multiple GPUs
-- Least-loaded worker selection
-- True llama.cpp multi-sequence batching
-- Continuous batching
-- Worker health checks and fault recovery
+- PACE CUDA build and real-model TCP smoke run
+- Linux signal/shutdown checks (Windows tests terminate the child process)
+- Separate remote worker processes, worker registration protocol, and multiple GPUs
+- True multi-sequence and continuous GPU batching
+- Service-level benchmark experiments including TCP and scheduler delays
+
+The current router embeds **one worker in its own process**, binds to loopback, and uses the scheduler's default FIFO policy with a maximum batch size of four. The scheduler library supports priority/aging and least-loaded selection, but router CLI policy selection and multiple workers are not exposed yet. A coordinator heartbeat thread keeps the embedded worker registered; it does not prove that a hung model call is healthy.
 
 ## Repository Policy
 

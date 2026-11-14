@@ -1,5 +1,7 @@
 # Sutra: implementation and PACE-ICE execution guide
 
+> Integration update, 14 November 2026: this document contains historical milestones and proposed distributed-runtime contracts. Use [INTEGRATION_GUIDE.md](INTEGRATION_GUIDE.md) for the implemented build, embedded-worker TCP path, validation status, and manual steps.
+
 Updated 28 October 2026. Companion to `PROJECT_DELIVERY_PLAN.md` and `notebooks/Sutra_PACE_ICE_Demo.ipynb`. The standalone scheduler is now implemented; section 10 of the delivery plan records its exact API and Jayani/Dhruv follow-up work. Full-service notebook execution remains gated until transport/worker/launcher integration.
 
 ## 1. Use C++ source files, scripts, and a notebook together
