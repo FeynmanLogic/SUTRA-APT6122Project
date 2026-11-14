@@ -32,6 +32,7 @@ public:
 
         return responses;
     }
+
 };
 
 }  // namespace sutra has been defined for readability.

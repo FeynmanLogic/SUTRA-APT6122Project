@@ -1,34 +1,73 @@
-cmake_minimum_required(VERSION 3.16)
-project(Sutra VERSION 0.1.0 LANGUAGES CXX)
+﻿cmake_minimum_required(VERSION 3.20)
+project(Sutra VERSION 0.1.0 LANGUAGES C CXX)
 
-# This independent scheduler build never downloads dependencies or touches the
-# llama.cpp submodule. Dhruv can add an optional backend without coupling policy
-# tests to a GPU installation. Fail explicitly until that backend is wired up.
-option(SUTRA_ENABLE_LLAMA "Build the llama.cpp worker backend (not integrated yet)" OFF)
-if(SUTRA_ENABLE_LLAMA)
-    message(FATAL_ERROR "llama.cpp worker integration is pending; build the scheduler with SUTRA_ENABLE_LLAMA=OFF")
-endif()
-
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+option(SUTRA_ENABLE_LLAMA "Build the llama.cpp inference backend" OFF)
+option(SUTRA_BUILD_ROUTER "Build the TCP router (requires nlohmann_json)" OFF)
 find_package(Threads REQUIRED)
+
 add_library(sutra_scheduler scheduler/scheduler.cpp)
 target_include_directories(sutra_scheduler PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_compile_features(sutra_scheduler PUBLIC cxx_std_17)
-set_target_properties(sutra_scheduler PROPERTIES CXX_EXTENSIONS OFF)
 target_link_libraries(sutra_scheduler PUBLIC Threads::Threads)
 if(MSVC)
     target_compile_options(sutra_scheduler PRIVATE /W4)
 else()
     target_compile_options(sutra_scheduler PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-
+add_library(sutra_worker_core worker/worker.cpp)
+target_include_directories(sutra_worker_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(sutra_worker_core PUBLIC Threads::Threads)
 add_executable(sutra_scheduler_demo examples/scheduler_demo.cpp)
 target_link_libraries(sutra_scheduler_demo PRIVATE sutra_scheduler)
+
+if(SUTRA_ENABLE_LLAMA)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/llama.cpp/CMakeLists.txt")
+        message(FATAL_ERROR "Initialize llama.cpp first: git submodule update --init --recursive")
+    endif()
+    # CUDA and its architecture remain caller-selected, allowing CPU builds.
+    option(GGML_CUDA "Enable CUDA in llama.cpp" OFF)
+    set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+    set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(external/llama.cpp external/llama-build)
+    add_library(sutra_llama inference/llama_engine.cpp)
+    target_include_directories(sutra_llama PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(sutra_llama PUBLIC llama Threads::Threads)
+    add_executable(sutra_worker worker/worker_main.cpp)
+    target_link_libraries(sutra_worker PRIVATE sutra_worker_core sutra_llama)
+    add_executable(sutra_benchmark
+        benchmark/benchmark_client.cpp benchmark/benchmark_runner.cpp
+        benchmark/workload_generator.cpp monitoring/gpu_monitor.cpp)
+    target_link_libraries(sutra_benchmark PRIVATE sutra_worker_core sutra_llama)
+endif()
+
+if(SUTRA_BUILD_ROUTER)
+    find_package(nlohmann_json 3.11 QUIET)
+    if(NOT nlohmann_json_FOUND)
+        include(FetchContent)
+        FetchContent_Declare(nlohmann_json
+            GIT_REPOSITORY https://github.com/nlohmann/json.git
+            GIT_TAG v3.11.3 GIT_SHALLOW TRUE)
+        FetchContent_MakeAvailable(nlohmann_json)
+    endif()
+    add_executable(sutra_router router/router_demo.cpp)
+    target_link_libraries(sutra_router PRIVATE sutra_scheduler sutra_worker_core nlohmann_json::nlohmann_json)
+    if(WIN32)
+        target_link_libraries(sutra_router PRIVATE ws2_32)
+    endif()
+    if(SUTRA_ENABLE_LLAMA)
+        target_compile_definitions(sutra_router PRIVATE SUTRA_ENABLE_LLAMA=1)
+        target_link_libraries(sutra_router PRIVATE sutra_llama)
+    endif()
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
     add_executable(sutra_scheduler_tests tests/test_scheduler.cpp)
     target_link_libraries(sutra_scheduler_tests PRIVATE sutra_scheduler)
     add_test(NAME scheduler COMMAND sutra_scheduler_tests)
-    # Bound a deadlock regression rather than leave CI/ICE hanging forever.
     set_tests_properties(scheduler PROPERTIES TIMEOUT 30)
 endif()

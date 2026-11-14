@@ -1,28 +1,62 @@
 ﻿# Sutra
 
-**Sutra** is a multithreaded and distributed C++ framework for efficient LLM inference. It uses CUDA and multiple GPU workers to improve inference performance while supporting concurrent requests, batching, scheduling, load balancing, monitoring, and fault handling.
+Sutra is a multithreaded and distributed C++ framework for efficient LLM inference. It integrates [llama.cpp](https://github.com/ggml-org/llama.cpp) for CUDA-accelerated model execution and provides interfaces for request routing, scheduling, batching, worker execution, benchmarking, and GPU monitoring.
 
-Planning and execution: [delivery plan and checklist](PROJECT_DELIVERY_PLAN.md), [step-by-step implementation guide](IMPLEMENTATION_GUIDE.md), and [PACE-ICE precheck/demo notebook](notebooks/Sutra_PACE_ICE_Demo.ipynb). The notebook can probe the environment and run an optional llama.cpp baseline now; the Sutra runtime/demo stages remain pending implementation.
-
-## Team Integration Guide
-
-Sutra is divided into three independently developed subsystems:
+## Team
 
 | Subsystem | Owner | Primary responsibility |
 |---|---|---|
-| Router | Jayani | Accept clients, assign request IDs, serialize messages, and return responses |
-| Scheduler | Aashish | Queue requests, apply scheduling policies, construct batches, and select workers |
-| Inference and benchmarking | Dhruv | Load the model, execute batches, collect metrics, and benchmark performance |
+| Router | Jayani Malik | Accept clients, assign request IDs, serialize messages, and return responses |
+| Scheduler | Aashish Rahate | Queue requests, apply scheduling policies, construct batches, and select workers |
+| Inference and benchmarking | Dhruv Kulkarni | Load models, execute requests, collect metrics, monitor GPUs, and benchmark performance |
 
-### Shared request contract
+## Architecture
 
-All components must use the types declared in:
+```text
+Client
+  |
+  v
+TCP Router
+  |
+  v
+Request Queue and Scheduler
+  |
+  v
+Inference Worker
+  |
+  v
+LlamaEngine and llama.cpp
+  |
+  v
+NVIDIA GPU
+```
+
+The response follows the reverse path. The original `request_id` must remain unchanged throughout the complete request lifecycle.
+
+## Repository Structure
+
+```text
+SUTRA-APT6122Project/
+├── benchmark/       Benchmark configuration, workload generation, and runner
+├── common/          Shared request and response structures
+├── inference/       Inference interface and llama.cpp implementation
+├── monitoring/      GPU utilization, memory, temperature, and power monitoring
+├── worker/          Inference worker abstraction
+├── external/
+│   └── llama.cpp/   llama.cpp Git submodule
+├── tests/           Project tests
+└── CMakeLists.txt
+```
+
+## Shared Request Contract
+
+All subsystems use the request and response types declared in:
 
 ```text
 common/inference_types.hpp
 ```
 
-The logical request and response structures are:
+The logical structures are:
 
 ```cpp
 struct InferenceRequest {
@@ -52,52 +86,27 @@ struct InferenceResponse {
 };
 ```
 
-`arrival_time_ms` means Unix-epoch time in milliseconds and should be assigned when the router accepts a request.
+`arrival_time_ms` is Unix epoch time in milliseconds and should be assigned when the router accepts a request.
 
-The TCP router must serialize these fields into a defined wire format. It must not transmit the raw in-memory bytes of the C++ structures because objects such as `std::string` contain process-local memory addresses.
+The router must serialize these fields into an explicitly defined wire format. It must not transmit the raw bytes of these structures because objects such as `std::string` contain process-local memory addresses.
 
-### Request flow
+## Inference Interface
 
-```text
-Client
-  → Router creates InferenceRequest
-  → Scheduler queues and batches requests
-  → Scheduler selects an available worker
-  → Worker calls LlamaEngine
-  → LlamaEngine generates tokens through llama.cpp
-  → Worker returns InferenceResponse
-  → Router matches request_id and replies to the client
-```
-
-The value of `request_id` must remain unchanged throughout this complete path.
-
-### Inference interface
-
-The worker accesses model execution through the `InferenceEngine` interface:
+Workers access model execution through the `InferenceEngine` interface:
 
 ```cpp
-/*
-Written by Dhruv Kulkarni, 6122APT, last modified on Oct 17
-*/
-
-#pragma once
-
-#include "../common/inference_types.hpp"
-
-#include <string>
-
-namespace sutra {
-
 class InferenceEngine {
 public:
     virtual ~InferenceEngine() = default;
-    //this following function will load the model
-    virtual bool loadModel(const std::string& model_path) = 0;
-//this will generate one request
+
+    virtual bool loadModel(
+        const std::string& model_path
+    ) = 0;
+
     virtual InferenceResponse generatesingle(
         const InferenceRequest& request
     ) = 0;
-//this will generate a batch of requests, initially it will loop through requests, until Jayani/Ashish write the scheduler and router.
+
     virtual ResponseBatch generatefullBatch(
         const RequestBatch& requests
     ) {
@@ -105,150 +114,380 @@ public:
         responses.reserve(requests.size());
 
         for (const auto& request : requests) {
-            responses.push_back(generatesingle(request));
+            responses.push_back(
+                generatesingle(request)
+            );
         }
 
         return responses;
     }
 };
-
-}  // namespace sutra has been defined for readability.
 ```
 
-Two implementations are planned:
+`LlamaEngine` implements this interface using llama.cpp. It loads the model once, applies the model's chat template, tokenizes the prompt, generates output tokens, and records performance metrics.
 
-- `MockInferenceEngine` returns deterministic fake responses for scheduler, router, and worker tests.
-- `LlamaEngine` loads a GGUF model once and performs real inference through llama.cpp.
+The current default batch implementation processes aggregated requests sequentially. This is request batching at the worker interface, not simultaneous multi-sequence GPU inference.
 
-The router and scheduler must not call llama.cpp directly.
+## Integration Responsibilities
 
-### Router integration instructions
+### Router
 
 The router is responsible for:
 
 1. Assigning a unique `request_id`.
 2. Recording `arrival_time_ms`.
-3. Reading the prompt, token limit, and priority.
-4. Serializing the request for transfer.
-5. Sending the request to the scheduler.
-6. Matching the returned response by `request_id`.
+3. Reading the prompt, output-token limit, and priority.
+4. Serializing requests for network transfer.
+5. Sending requests to the scheduler.
+6. Matching returned responses using `request_id`.
 7. Returning generated text or an error to the correct client.
 
-The router should not calculate model-execution time. It may calculate client-observed end-to-end latency.
+The router may calculate client-observed end-to-end latency, but it should not calculate internal model-execution time.
 
-### Scheduler integration instructions
+### Scheduler
 
-The scheduler receives individual `InferenceRequest` objects and produces a `RequestBatch`:
+The scheduler receives individual requests and creates batches:
 
 ```cpp
-using RequestBatch = std::vector<InferenceRequest>;
+using RequestBatch =
+    std::vector<InferenceRequest>;
 ```
 
 The scheduler is responsible for:
 
-1. FIFO or priority queueing.
-2. Enforcing maximum batch size.
-3. Enforcing maximum batch waiting time.
+1. FIFO or priority-based queueing.
+2. Enforcing a maximum batch size.
+3. Enforcing a maximum batch waiting time.
 4. Preventing indefinite low-priority starvation.
-5. Selecting a worker using round-robin or least-loaded selection.
-6. Sending the complete batch to the selected worker.
+5. Selecting an available worker.
+6. Sending the complete batch to that worker.
 
-The scheduler must not modify request IDs or prompts.
+The scheduler must not change request IDs or prompt contents.
 
-Initially, a batch may be processed sequentially by the worker. This is request aggregation, not true batched GPU inference. True multi-sequence and continuous batching are later optimizations.
-
-### Worker integration instructions
+### Worker
 
 Each worker owns:
 
 - One worker ID
-- One `InferenceEngine`
+- One inference engine
 - One loaded model
-- One llama.cpp context or managed context set
+- One llama.cpp context
 - One assigned GPU device
 
-The worker exposes the logical operation:
+The worker exposes:
 
 ```cpp
-ResponseBatch processBatch(const RequestBatch& requests);
+ResponseBatch processBatch(
+    const RequestBatch& requests
+);
 ```
 
-For every input request, the worker must return exactly one response with the same request ID. An inference failure should produce `success = false` and an error message instead of terminating the worker process.
+For each input request, the worker must return exactly one response with the same request ID.
 
-A single llama.cpp context must not be called concurrently by unrelated threads unless synchronization or independent contexts are provided.
+Inference failures should return `success = false` and an explanatory `error_message`. A failed request should not terminate the worker process.
 
-### Metrics ownership
+A single llama.cpp context is protected from concurrent access. True parallel model execution requires independent worker processes or separately managed contexts.
 
-The worker records:
+## Metrics
 
-- Input-token count
-- Output-token count
+### Per-request metrics
+
+The inference and worker layers record:
+
+- Input tokens
+- Generated tokens
 - Queue time
 - Inference time
 - Time to first token
-- Request latency
+- Total request latency
 - Generated tokens per second
 - Worker ID
 - Success or failure
 
+### Aggregate benchmark metrics
+
 The benchmark runner calculates:
 
-- Completed and failed request counts
+- Completed requests
+- Failed requests
 - Requests per second
-- Aggregate output tokens per second
+- Aggregate generated tokens per second
 - Mean latency
 - Median latency
-- P95 and P99 latency
-- Median and P95 time to first token
+- P95 latency
+- P99 latency
+- Median time to first token
+- P95 time to first token
 
-Aggregate token throughput must be calculated as total generated tokens divided by total benchmark wall time. It must not be calculated by averaging per-request token rates.
+Aggregate token throughput is calculated as:
 
-### Repository workflow
+```text
+total generated tokens / benchmark wall time
+```
 
-Clone the project and its llama.cpp dependency with:
+It is not calculated by averaging individual request token rates.
+
+## GPU Monitoring
+
+The benchmark runner can launch a background GPU monitor during the measured portion of an experiment.
+
+The monitor records:
+
+- GPU utilization
+- GPU memory usage
+- Total GPU memory
+- GPU temperature
+- GPU power consumption
+- Unix timestamp
+- Elapsed benchmark time
+
+GPU statistics are collected through `nvidia-smi` and written to a separate CSV file.
+
+Example output:
+
+```csv
+unix_time_ms,elapsed_ms,gpu_index,gpu_name,gpu_utilization_percent,memory_used_mib,memory_total_mib,temperature_c,power_draw_w
+1794496693002,0.000,0,Tesla V100-PCIE-16GB,81,1086,16384,47,86.91
+```
+
+## Cloning the Repository
+
+Clone the repository together with its llama.cpp dependency:
 
 ```bash
 git clone --recurse-submodules \
   https://github.com/FeynmanLogic/SUTRA-APT6122Project.git
+
+cd SUTRA-APT6122Project
 ```
 
-If the repository was cloned without submodules:
+If the repository was cloned without its submodules:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-Team members should avoid editing files owned by another subsystem unless the change is coordinated. Changes to `common/inference_types.hpp` affect every subsystem and must be communicated to the complete team.
+## PACE ICE Environment
 
-Recommended branches are:
+The implementation has been tested with:
 
-```text
-dhruv-inference
-aashish-scheduler
-jayani-router
-```
-
-The model files, generated binaries, and raw benchmark output are not stored in Git. They are excluded through `.gitignore`.
-
-### Current status
-
-The following setup has been verified on PACE ICE:
-
-- NVIDIA Tesla V100 16 GB
+- NVIDIA Tesla V100-PCIE-16GB
 - CUDA 12.6
-- llama.cpp with CUDA support
-- Qwen2.5 0.5B Instruct using Q4_K_M quantization
-- CPU and GPU llama.cpp microbenchmarks
+- GCC 12.3
+- CMake 3.31
+- Qwen2.5-0.5B-Instruct Q4_K_M
 
-The standalone scheduler is implemented and tested locally. It supports bounded admission, FIFO/priority with aging, count/timer batches, round-robin/least-loaded worker selection, capacity accounting, deadlines, heartbeat expiry and shutdown. Router/worker wiring, real inference and end-to-end benchmarking remain pending. Jayani's initial TCP echo router is on `feature/tcp-router` and has not been merged into this branch. See [the scheduler handoff](PROJECT_DELIVERY_PLAN.md#10-scheduler-delivery-and-teammate-handoff--28-october-2026) for the API and owner checklists.
-
-Build and exercise the scheduler without CUDA, a model, or the llama.cpp submodule:
+Load the required modules:
 
 ```bash
-cmake -S . -B build-scheduler -DCMAKE_BUILD_TYPE=Release -DSUTRA_ENABLE_LLAMA=OFF
-cmake --build build-scheduler --parallel 4
-ctest --test-dir build-scheduler --output-on-failure --no-tests=error
-./build-scheduler/sutra_scheduler_demo
+module load gcc/12.3.0
+module load cuda/12.6.1
 ```
 
-The demo uses synthetic replies and does not measure inference or networking performance. `SUTRA_ENABLE_LLAMA=ON` explicitly fails until the worker/backend integration is implemented.
+Confirm that the GPU and CUDA compiler are available:
+
+```bash
+nvidia-smi
+nvcc --version
+```
+
+The CUDA module must be loaded both when building and when running the executables. Otherwise, shared libraries such as `libcudart.so.12` and `libcublas.so.12` may not be found.
+
+## Downloading the Model
+
+Model files are not stored in Git.
+
+Download the tested GGUF model with:
+
+```bash
+mkdir -p models
+
+curl -L --fail --progress-bar \
+  -o models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+  "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+```
+
+## Building Sutra
+
+Configure the project for the V100 GPU, which has CUDA compute capability 7.0:
+
+```bash
+cmake -S . -B build-sutra \
+  -DGGML_CUDA=ON \
+  -DCMAKE_CUDA_ARCHITECTURES=70 \
+  -DCMAKE_BUILD_TYPE=Release
+```
+
+Build the project:
+
+```bash
+cmake --build build-sutra -j
+```
+
+## Running Inference
+
+Run the worker or inference executable using the downloaded model:
+
+```bash
+./build-sutra/sutra_worker \
+  models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+```
+
+The exact worker arguments may change as router and scheduler integration is completed.
+
+## Running a Benchmark
+
+The benchmark program accepts custom workloads and also provides a generated default workload.
+
+Example CUDA benchmark:
+
+```bash
+mkdir -p results
+
+./build-sutra/sutra_benchmark \
+  --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+  --backend cuda \
+  --requests 20 \
+  --warmup 3 \
+  --concurrency 1 \
+  --batch-size 1 \
+  --prompt "Explain distributed computing briefly." \
+  --output results/request_metrics.csv \
+  --run-id cuda-test
+```
+
+### GPU-monitored benchmark
+
+```bash
+./build-sutra/sutra_benchmark \
+  --model models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+  --backend cuda \
+  --requests 20 \
+  --warmup 3 \
+  --concurrency 1 \
+  --batch-size 1 \
+  --prompt "Explain distributed computing briefly." \
+  --output results/monitor_test_requests.csv \
+  --run-id monitor-test \
+  --gpu-monitor \
+  --gpu-output results/monitor_test_gpu.csv \
+  --gpu-interval-ms 200
+```
+
+### Workload options
+
+The benchmark supports:
+
+```text
+--prompt "text"          Use one prompt for every request
+--prompt-file file.txt   Read prompts from a file
+--mixed                  Generate a mixed workload
+```
+
+If none of these options is supplied, the workload generator creates a default uniform workload.
+
+### CPU comparison
+
+Run the same experiment on the CPU by changing:
+
+```bash
+--backend cuda
+```
+
+to:
+
+```bash
+--backend cpu
+```
+
+## Verified Results
+
+The following results were measured on one Tesla V100 using the Qwen2.5-0.5B-Instruct Q4_K_M model.
+
+### llama.cpp microbenchmark
+
+| Operation | CPU throughput | GPU throughput | GPU speedup |
+|---|---:|---:|---:|
+| Prompt processing, 128 tokens | 1244.9 tokens/s | 8816.5 tokens/s | 7.08x |
+| Token generation, 64 tokens | 88.0 tokens/s | 422.5 tokens/s | 4.80x |
+
+### Sutra end-to-end benchmark
+
+For 20 requests generating 64 tokens each:
+
+| Metric | Result |
+|---|---:|
+| Completed requests | 20 |
+| Failed requests | 0 |
+| Requests per second | 5.57 |
+| Generated tokens per second | 356.37 |
+| Mean latency | 179.58 ms |
+| P50 latency | 179.47 ms |
+| P95 latency | 179.86 ms |
+| P99 latency | 180.64 ms |
+| P50 time to first token | 7.81 ms |
+| P95 time to first token | 7.94 ms |
+
+During the run, GPU utilization remained approximately 80 to 82%, model memory usage remained at approximately 1086 MiB, and GPU temperature remained between 47°C and 48°C.
+
+These results describe one inference worker using one llama.cpp context.
+
+## Concurrency Interpretation
+
+The current `LlamaEngine` protects its llama.cpp context with a mutex. Multiple benchmark client threads may submit requests concurrently, but model execution inside one engine remains serialized.
+
+Therefore:
+
+- `--concurrency 1` measures the single-worker baseline.
+- Higher concurrency values measure queueing and contention around one worker.
+- Higher concurrency does not represent parallel GPU execution.
+- Parallel execution requires multiple workers or independent llama.cpp contexts.
+- Sequential `generatefullBatch()` is not true multi-sequence llama.cpp batching.
+
+This distinction must be preserved when reporting performance results.
+
+## Current Status
+
+Completed:
+
+- llama.cpp integration as a Git submodule
+- CUDA model loading
+- GGUF model inference
+- Model chat-template application
+- Single-request generation
+- Sequential worker batch processing
+- Per-request performance metrics
+- Configurable workload generation
+- Concurrent benchmark submission
+- Request-level CSV output
+- Aggregate benchmark statistics
+- CPU and GPU microbenchmarks
+- Background GPU monitoring
+- GPU metrics CSV output
+
+Integration work:
+
+- TCP router connection
+- Scheduler-to-worker connection
+- Final shared wire protocol
+- End-to-end distributed execution
+
+Potential extensions:
+
+- Multiple worker processes across multiple GPUs
+- Least-loaded worker selection
+- True llama.cpp multi-sequence batching
+- Continuous batching
+- Worker health checks and fault recovery
+
+## Repository Policy
+
+The following files are intentionally excluded from Git:
+
+- Model files
+- Build directories
+- Generated executables
+- Raw benchmark output
+- Temporary result files
+
+Changes to `common/inference_types.hpp` affect every subsystem and must be communicated to the complete team.

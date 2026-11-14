@@ -1,5 +1,5 @@
 /*
-Written by Dhruv Kulkarni, 6122APT, last modified on Oct 17
+Written by Dhruv Kulkarni, 6122APT, last modified on Nov 12
 This file will define how benchmark requests are to be handled.
 */
 
@@ -40,7 +40,13 @@ std::string prompt_file;
 bool mixed_workload{false}; 
     int approximate_prompt_tokens{128};
     int max_new_tokens{64};
+bool enable_gpu_monitor{false};
 
+std::string gpu_metrics_csv{
+    "results/gpu_metrics.csv"
+};
+
+int gpu_sample_interval_ms{200};
     std::uint64_t random_seed{42};
 
     std::string output_csv{"results/requests.csv"};
