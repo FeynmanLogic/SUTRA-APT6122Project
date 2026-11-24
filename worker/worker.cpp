@@ -56,6 +56,12 @@ ResponseBatch InferenceWorker::processBatch(
                 responses[index].request_id !=
                 requests[index].request_id
             ) {
+                // Preserve the input ID so the scheduler can terminate this
+                // request rather than rejecting it and waiting for a timeout.
+                // Discard another request's text and metrics as well.
+                responses[index] = InferenceResponse{};
+                responses[index].request_id = requests[index].request_id;
+                responses[index].worker_id = worker_id_;
                 responses[index].success = false;
                 responses[index].error_message =
                     "Request and response IDs do not match.";

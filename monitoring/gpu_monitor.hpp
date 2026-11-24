@@ -7,6 +7,7 @@ Written by Dhruv Kulkarni, 6122APT, last modified on Nov 12
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>

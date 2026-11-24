@@ -66,8 +66,10 @@ int main(int argc, char* argv[]) {
     const sutra::ResponseBatch responses =
         worker.processBatch(requests);
 
+    bool all_succeeded = true;
     for (const auto& response : responses) {
         if (!response.success) {
+            all_succeeded = false;
             std::cerr
                 << "Request "
                 << response.request_id
@@ -98,5 +100,5 @@ int main(int argc, char* argv[]) {
             << " tokens/s\n";
     }
 
-    return 0;
+    return all_succeeded ? 0 : 1;
 }

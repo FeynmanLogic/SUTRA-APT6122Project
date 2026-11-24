@@ -1,4 +1,13 @@
 build-llama/
 models/
 results/
-build-sutra/
+build*/
+__pycache__/
+.ipynb_checkpoints/
+
+# Personal learning notes; intentionally excluded from team commits.
+/SCHEDULER_LEARNING_GUIDE.local.md
+
+/router/tcp_server
+/router/tcp_server_backup.cpp
+/router/router_demo

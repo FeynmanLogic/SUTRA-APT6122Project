@@ -132,7 +132,11 @@ void GpuMonitor::monitorLoop() {
         "memory.used,memory.total,temperature.gpu,"
         "power.draw "
         "--format=csv,noheader,nounits "
+#ifdef _WIN32
+        "2>NUL";
+#else
         "2>/dev/null";
+#endif
 
     while (running_.load()) {
         const auto sample_time =
@@ -147,7 +151,11 @@ void GpuMonitor::monitorLoop() {
                 monitoring_start
             ).count();
 
+#ifdef _WIN32
+        FILE* pipe = _popen(command, "r");
+#else
         FILE* pipe = popen(command, "r");
+#endif
 
         if (pipe == nullptr) {
             std::cerr
@@ -186,7 +194,11 @@ void GpuMonitor::monitorLoop() {
                 }
             }
 
+#ifdef _WIN32
+            _pclose(pipe);
+#else
             pclose(pipe);
+#endif
             output.flush();
         }
 
